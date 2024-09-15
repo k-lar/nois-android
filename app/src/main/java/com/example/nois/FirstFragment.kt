@@ -3,8 +3,10 @@ package com.example.nois
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
@@ -33,7 +35,18 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         const val NOTIFICATION_ID = 1
-        const val CHANNEL_ID = "NoiseGeneratorChannel"
+        const val CHANNEL_ID = "NoisGeneratorChannel"
+        const val ACTION_STOP = "com.example.nois.STOP"
+    }
+
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_STOP) {
+                stopNoise()
+                cancelNotification()
+                toggleButton.isChecked = false
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,6 +79,7 @@ class MainActivity : AppCompatActivity() {
 
         initializeAudioTrack()
         createNotificationChannel()
+        registerReceiver(stopReceiver, IntentFilter(ACTION_STOP))
     }
 
     private fun initializeAudioTrack() {
@@ -129,10 +143,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showNotification() {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        val pendingIntent: PendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(ACTION_STOP)
+        val stopPendingIntent: PendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
@@ -140,7 +157,7 @@ class MainActivity : AppCompatActivity() {
             .setContentText("Noise is playing")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(true)
-            .addAction(R.drawable.ic_close, "Stop", pendingIntent)
+            .addAction(R.drawable.ic_close, "Stop", stopPendingIntent)
 
         val notificationManager: NotificationManager =
             getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -158,5 +175,6 @@ class MainActivity : AppCompatActivity() {
         stopNoise()
         audioTrack.release()
         cancelNotification()
+        unregisterReceiver(stopReceiver)
     }
 }
