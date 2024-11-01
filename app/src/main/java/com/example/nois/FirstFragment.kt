@@ -3,6 +3,7 @@ package com.example.nois
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,8 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
+import android.os.PowerManager
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.ToggleButton
@@ -19,18 +22,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationCompat
 
 class MainActivity : AppCompatActivity() {
-
-    private lateinit var audioTrack: AudioTrack
-    private var isPlaying = false
     private lateinit var toggleButton: ToggleButton
     private lateinit var volumeSeekBar: SeekBar
     private lateinit var volumeLabel: TextView
-    private val sampleRate = 44100
-    private val bufferSize = AudioTrack.getMinBufferSize(
-        sampleRate,
-        AudioFormat.CHANNEL_OUT_MONO,
-        AudioFormat.ENCODING_PCM_FLOAT
-    )
     private var volume = 0.5f
 
     companion object {
@@ -43,7 +37,6 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_STOP) {
                 stopNoise()
-                cancelNotification()
                 toggleButton.isChecked = false
             }
         }
@@ -60,10 +53,8 @@ class MainActivity : AppCompatActivity() {
         toggleButton.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
                 startNoise()
-                showNotification()
             } else {
                 stopNoise()
-                cancelNotification()
             }
         }
 
@@ -71,15 +62,85 @@ class MainActivity : AppCompatActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 volume = progress / 100f
                 volumeLabel.text = "Volume: ${progress}%"
+                if (toggleButton.isChecked) {
+                    startNoise() // Update the service with new volume
+                }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        initializeAudioTrack()
         createNotificationChannel()
         registerReceiver(stopReceiver, IntentFilter(ACTION_STOP))
+    }
+
+    private fun startNoise() {
+        val intent = Intent(this, NoiseService::class.java).apply {
+            action = NoiseService.Companion.ACTION_START
+            putExtra(NoiseService.Companion.EXTRA_VOLUME, volume)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun stopNoise() {
+        val intent = Intent(this, NoiseService::class.java).apply {
+            action = NoiseService.Companion.ACTION_STOP
+        }
+        startService(intent)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Noise Generator"
+            val descriptionText = "Noise Generator Notification Channel"
+            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            val notificationManager: NotificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(stopReceiver)
+    }
+}
+
+class NoiseService : Service() {
+    private lateinit var audioTrack: AudioTrack
+    private var isPlaying = false
+    private lateinit var wakeLock: PowerManager.WakeLock
+    private val sampleRate = 44100
+    private var volume = 0.5f
+
+    private val bufferSize = AudioTrack.getMinBufferSize(
+        sampleRate,
+        AudioFormat.CHANNEL_OUT_MONO,
+        AudioFormat.ENCODING_PCM_FLOAT
+    )
+
+    override fun onCreate() {
+        super.onCreate()
+        initializeAudioTrack()
+        initializeWakeLock()
+    }
+
+    private fun initializeWakeLock() {
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "Nois::NoiseServiceWakeLock"
+        ).apply {
+            setReferenceCounted(false)
+        }
     }
 
     private fun initializeAudioTrack() {
@@ -102,8 +163,24 @@ class MainActivity : AppCompatActivity() {
             .build()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> {
+                volume = intent.getFloatExtra(EXTRA_VOLUME, 0.5f)
+                startNoise()
+            }
+            ACTION_STOP -> stopNoise()
+        }
+        return START_STICKY // This tells the system to recreate the service if it's killed
+    }
+
     private fun startNoise() {
         if (!isPlaying) {
+            if (!wakeLock.isHeld) {
+                wakeLock.acquire() // No timeout - will hold until explicitly released
+            }
+            startForeground(MainActivity.NOTIFICATION_ID, createNotification())
+
             isPlaying = true
             Thread {
                 val buffer = FloatArray(bufferSize / 4)
@@ -126,24 +203,15 @@ class MainActivity : AppCompatActivity() {
         isPlaying = false
         audioTrack.stop()
         audioTrack.flush()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = "Noise Generator"
-            val descriptionText = "Noise Generator Notification Channel"
-            val importance = NotificationManager.IMPORTANCE_DEFAULT
-            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
-                description = descriptionText
-            }
-            val notificationManager: NotificationManager =
-                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
+        if (wakeLock.isHeld) {
+            wakeLock.release()
         }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
-    private fun showNotification() {
-        val stopIntent = Intent(ACTION_STOP)
+    private fun createNotification(): android.app.Notification {
+        val stopIntent = Intent(MainActivity.ACTION_STOP)
         val stopPendingIntent: PendingIntent = PendingIntent.getBroadcast(
             this,
             0,
@@ -151,30 +219,27 @@ class MainActivity : AppCompatActivity() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, MainActivity.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Nois")
             .setContentText("Noise is playing")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(true)
             .addAction(R.drawable.ic_close, "Stop", stopPendingIntent)
-
-        val notificationManager: NotificationManager =
-            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, builder.build())
-    }
-
-    private fun cancelNotification() {
-        val notificationManager: NotificationManager =
-            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.cancel(NOTIFICATION_ID)
+            .build()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopNoise()
         audioTrack.release()
-        cancelNotification()
-        unregisterReceiver(stopReceiver)
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        const val ACTION_START = "com.example.nois.START"
+        const val ACTION_STOP = "com.example.nois.STOP"
+        const val EXTRA_VOLUME = "volume"
     }
 }
